@@ -18,6 +18,7 @@ import platform
 import stat
 import sys
 import urlparse
+import time
 
 import M2Crypto
 import certifi
@@ -202,21 +203,32 @@ class OktaAPIAuth:
                 self.username)
             log.debug(msg)
 
+            factor_order = ["token:software:totp", "push"]
+
             res = None
-            for factor in rv['_embedded']['factors']:
-                if factor['factorType'] != "token:software:totp":
-                    continue
-                fid = factor['id']
-                state_token = rv['stateToken']
-                try:
-                    res = self.doauth(fid, state_token)
-                except Exception, s:
-                    log.error('Unexpected error with the Okta API: %s' % (s))
-                    return False
-                if 'status' in res and res['status'] == 'SUCCESS':
-                    log.info(("User %s is now authenticated "
-                              "with MFA via Okta API") % self.username)
-                    return True
+            for desired_factor in factor_order:
+                for factor in rv['_embedded']['factors']:
+                    if factor['factorType'] == desired_factor:
+                        fid = factor['id']
+                        state_token = rv['stateToken']
+                        try:
+                            res = self.doauth(fid, state_token)
+                            mfa_check_count = 0
+                            while 'status' in res and res['status'] == "MFA_CHALLENGE" and \
+                                    'factorResult' in res and res['factorResult'] == "WAITING":
+                                res = self.doauth(fid, state_token)
+                                mfa_check_count += 1
+                                if mfa_check_count > 20:
+                                    log.info('User %s MFA_CHALLENGE timed out' % self.username)
+                                    return False
+                                time.sleep(2)
+                        except Exception, s:
+                            log.error('Unexpected error with the Okta API: %s' % (s))
+                            return False
+                        if 'status' in res and res['status'] == 'SUCCESS':
+                            log.info(("User %s is now authenticated "
+                                      "with MFA via Okta API") % self.username)
+                            return True
 
             if 'errorCauses' in res:
                 msg = res['errorCauses'][0]['errorSummary']
